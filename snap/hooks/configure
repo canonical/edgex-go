@@ -1,5 +1,42 @@
 #!/bin/bash
 
+logger "edgexfoundry CONFIGURE hook START"
+
+# TODO: source from another file???
+declare -A conf_to_env
+
+# [Writable]
+conf_to_env["writable.log-level"]="BootTimeout"
+
+# [Service]
+conf_to_env["service.boot-timeout"]="SERVICE_BOOTTIMEOUT"
+conf_to_env["service.check-interval"]="SERVICE_CHECKINTERVAL"
+conf_to_env["service.host"]="SERVICE_HOST"
+conf_to_env["service.server-bind-addr"]="SERVICE_SERVERBINDADDR"
+conf_to_env["service.port"]="SERVICE_PORT"
+conf_to_env["service.protocol"]="SERVICE_PROTOCOL"
+conf_to_env["service.max-result-count"]="SERVICE_MAXRESULTCOUNT"
+conf_to_env["service.startup-msg"]="SERVICE_STARTUPMSG"
+conf_to_env["service.timeout"]="SERVICE_TIMEOUT"
+
+# NOTE - since this hook currently iterates through all of the
+# service hooks and then starts/stops each based on the current
+# status, restarting after a config key has changed needs to be
+# taken into accout, and forced restart implemented. Note, for
+# simplicity sake, it may also make sense to *always* restart
+# services vs. add the complexity of talking to Consul to effect
+# the change.
+#
+# TODO: document behavior @ install time. Is the configure hook
+# called *before* the services are started?
+#
+# The syntax to set a configuration key is:
+#
+# env.<service name>.<section>.<keyname>
+# 
+# This initial implementation only supports EdgeX core-* and
+# support-* services.
+
 # this is a little hackish, but reads better to use string concatenation 
 # to build the list of services than have a long string 
 ALL_SERVICES=""
@@ -80,9 +117,74 @@ update_consul_db_type () {
         http://localhost:8500/v1/kv/edgex/core/1.0/edgex-"$1"/Databases/Primary/Port
 }
 
+handle_config () {
+    # the following logic to convert a JSON key/value array to a bash map is
+    # based on the following stackoverflow example:
+    #
+    # https://stackoverflow.com/questions/26717277/converting-a-json-object-into-a-bash-associative-array
+    #
+    # FIXME: one issue with this implementation is that it strips quotes that may have been specified
+    # when 'snap set' was called. This could cause problems with values that contain spaces or other
+    # special characters.
+
+    map_init=$(echo $2 | jq -r '. as $in | reduce leaf_paths as $path ({}; . + { ($path | map(tostring) | join(".")): $in | getpath($path) }) | to_entries | map("[\(.key)]=\(.value)") | reduce .[] as $item ("configMap=("; . + ($item|@text) + " ") + ")"')
+
+    logger "edgex:configure: $map_init"
+
+    local mapAsString
+    mapAsString="$map_init"
+    local -A "$mapAsString"
+    file="$SNAP_DATA/config/$1/res/$1.env"
+
+    # if no $service.env file exists, create it
+    # TODO: get rid of fore loop, and just access
+    # the first (and only) element in the array
+    if [ ! -f "$file" ]; then
+	logger "edgex:configure: $file NOT FOUND!"
+        for ckey in "${!configMap[@]}"; do
+            val="${configMap["$ckey"]}"
+	    env="${conf_to_env["$ckey"]}"
+            logger "edgex:configure: writing $env=$val to $file"
+            echo "$env=$val" > "$file"
+            break
+        done
+    else
+        logger "edgex:configure: $file already exists"
+        for key in "${!configMap[@]}"; do
+            val="${configMap["$key"]}"
+	    env="${conf_to_env["$key"]}"
+
+            found=$(grep "$env" "$file")
+	    if [ -z "$found" ]; then
+		echo "$env=$val" >> "$file"
+	    else
+                # The following expression uses a negative
+		# address expression to skip updating the line if
+		# matches the existing snapd value
+		sed -i -e "/$env=$val/! s@$env=.*@$env=$val@" "$file"
+	    fi
+        done
+    fi
+}
+
 for key in $ALL_SERVICES; do
     # get the config key for the service
     status=$(snapctl get "$key")
+    config=$(snapctl get "env.$key")
+
+    if [ ! -z "$config" ]; then
+        handle_config "$key" "$config"
+    fi
+
+    # TODO: most config key changes other than writable.* require service restarts...
+
+    # Does service already have a ENV_OVERRIDES file on disk in $SNAP_DATA/config/<svc>/res?
+    # If so, iterate over config keys in $config; for each
+    #   - lookup environment override name in conf_to_env map
+    #   - is ENV var set in ENV_OVERRIDES already? If yes, is the value the same?
+    #   - if different --> update ENV_OVERRIDES
+    #   - else continue
+    
     case $key in 
         device*)
             # the device services are all using the device-sdk-go which waits

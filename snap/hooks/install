@@ -1,5 +1,7 @@
 #!/bin/bash -ex
 
+
+logger "edgexfoundry install hook start: `date`"
 # get the values of $SNAP_DATA and $SNAP using the current symlink instead of
 # the default behavior which has the revision hard-coded, which breaks after
 # a refresh
