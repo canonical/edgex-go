@@ -1,0 +1,5 @@
+#!/bin/bash -e
+
+# disable Vault TLS
+cp $SNAP/config/security-secret-store/vault-config.hcl $SNAP_DATA/config/security-secret-store/
+ 
